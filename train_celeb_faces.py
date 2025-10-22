@@ -29,11 +29,12 @@ print(f'Using device: {device}')
 
 
 ds = load_dataset("ashraq/tmdb-celeb-10k",split='train')
-ds = ds.select(range(1000))
+ds = ds.select(range(500))
+ds = ds.filter(lambda x: x['gender'] in [1, 2])
 
 
 
-transform = transforms.Compose([ transforms.Resize((128,128)),
+transform = transforms.Compose([ transforms.Resize((64,64)),
                             transforms.ToTensor(),
                             transforms.Normalize([0.5],[0.5]),
 ])
@@ -51,9 +52,12 @@ def collate_fn(examples):
     labels = []
     for example in examples:
         images.append((example["pixel_values"]))
+        labels.append(example["gender"])
         
     pixel_values = torch.stack(images)
-    return {"pixel_values": pixel_values}
+    labels = torch.tensor(labels).long() - 1
+    return {"pixel_values": pixel_values, "label":labels}
+
 dataloader = DataLoader(ds, collate_fn=collate_fn, batch_size=4)
 
 
@@ -64,7 +68,7 @@ print(scheduler)
 
 
 unet = UNet2DModel(
-    sample_size=128,
+    sample_size=64,
     in_channels = 3,
     out_channels = 3,
     layers_per_block=2,  # how many ResNet layers to use per UNet block
@@ -73,6 +77,7 @@ unet = UNet2DModel(
     mid_block_type = 'UNetMidBlock2D',
     up_block_types = ('AttnUpBlock2D', 'AttnUpBlock2D', 'AttnUpBlock2D', 'UpBlock2D'),
     block_out_channels= (64, 128, 160, 224),
+    num_class_embeds=2
 )
 
 unet.to(device)
@@ -80,8 +85,10 @@ unet.to(device)
 
 
 def generate_image():
+    torch.manual_seed(42)
     os.makedirs("runs", exist_ok=True)
-    xt = torch.randn(4,3,128,128).to(device)
+    xt = torch.randn(4,3,64,64).to(device)
+    label = torch.tensor([0,0,1,1]).long().to(device)
     
     inf_scheduler = DDIMScheduler.from_config(scheduler.config)
     inf_scheduler.set_timesteps(50)
@@ -90,7 +97,7 @@ def generate_image():
 
     for t in tqdm(inf_scheduler.timesteps,total=inf_scheduler.num_inference_steps,leave=False):
         with torch.no_grad():
-            noise_pred = unet(xt,t.to(device)).sample
+            noise_pred = unet(xt,t.to(device), label).sample
             
         
         xt = inf_scheduler.step(noise_pred, t.to(device), xt).prev_sample
@@ -129,13 +136,13 @@ while num_steps < max_train_steps:
         
         # Get some data and prepare the corrupted version
         x = batch['pixel_values'].to(device) 
-        # y = y.to(device)
+        y = batch['label'].long().to(device)
         noise = torch.randn_like(x)
         timesteps = torch.randint(0, 999, (x.shape[0],)).long().to(device)
         noisy_x = scheduler.add_noise(x, noise, timesteps)
 
         # Get the model prediction
-        pred = unet(noisy_x, timesteps).sample # Note that we pass in the labels y
+        pred = unet(noisy_x, timesteps, y).sample # Note that we pass in the labels y
 
         # Calculate the loss
         loss = loss_fn(pred, noise) / accumulation_steps  # scale loss # How close is the output to the noise
